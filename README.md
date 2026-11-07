@@ -17,21 +17,49 @@ Sistem lokomosi bipedal humanoid lengkap untuk robot **BarelangS** (21 DOF, 20 a
 
 ## 1. Quick Start (Cara Menjalankan)
 
-### A. Kemudi Interaktif (WASD Real-Time Teleop)
-Kendalikan robot layaknya karakter game dengan gerak jalan manusia asli:
+### A. Kemudi Interaktif & Autonomous Striker AI ([T] RoboCup Mode)
+Kendalikan robot layaknya karakter game dengan gerak jalan manusia asli, atau aktifkan kecerdasan buatan penendang bola otonom (*Autonomous Striker AI*):
 ```bash
 python steer_barelang_supermimic.py
 ```
-* **`[W]` / `[S]`**: Maju / Mundur
-* **`[A]` / `[D]`**: Belok Kiri / Kanan
+* **`[T]`**: **Toggle Autonomous Striker AI (RoboCup AI Mode)** $\to$ Robot otomatis mencari bola, lari kencang (*sprint*), mengunci posisi di belakang bola menghadap gawang, dan menendang keras ke gawang!
+* **`[W]` / `[S]`**: Maju / Mundur (*Walk* hingga *Sprint* $1.62\text{ m/s}$)
+* **`[A]` / `[D]`**: Belok Kiri / Kanan (*Steering*)
 * **`[Q]` / `[E]`**: Geser menyamping (*Strafe Left/Right*)
+* **`[K]` / `[SPACE]`**: Dynamic Soccer Kick (Tendangan kaki kanan berkecepatan tinggi)
 * **`[SPACE]`**: Berhenti (*auto-blend* ke posisi berdiri stabil)
-* **`[V]`**: Ganti kamera (*Chase Cam* di belakang robot vs *Free Orbit*)
-* **`[R]`**: Reset posisi robot ke awal `(0, 0)`
+* **`[1]` / `[2]` / `[3]`**: Kecepatan preset (Jalan Santai $0.50\text{ m/s}$, Jalan Cepat $0.80\text{ m/s}$, *Sprint* $1.55\text{ m/s}$)
+* **`[B]`**: *Respawn* / Acak posisi bola sepak di lapangan
+* **`[V]`**: Ganti kamera (*Chase Cam* $\to$ *TV Broadcast Pitch Cam* $\to$ *Goal Net Cam*)
+* **`[R]`**: Reset posisi robot dan bola sepak ke titik awal `(0, 0)`
 
 ---
 
-### B. Uji Ketahanan Dorongan & Stepping Recovery
+### B. Simulasi Pertandingan Sepak Bola Otonom (Autonomous Striker Match)
+Simulasikan robot BarelangS bertanding di arena RoboCup berstandar regulasi:
+```bash
+# Mode Interaktif GUI 3D:
+python sim_soccer_striker_ai.py
+
+# Render Video Demonstrasi Otonom (Approach -> Sprint -> Align -> Strike -> Goal -> Celebrate):
+python sim_soccer_striker_ai.py --render-demo data/mocap/barelang_soccer_striker_match.mp4
+```
+Kecepatan luncur bola mencapai **$17.6\text{ km/h}$** menjebol jaring gawang, diikuti selebrasi kemenangan robot mengangkat kedua lengan (*V-Pose Victory Celebration*)!
+
+---
+
+### C. Simulasi Fisika Murni Tendangan Bola Sepak (Newton Physics)
+Uji impak tabrakan dan momentum tendangan kaki robot terhadap bola sepak dengan kontak dinamis tertutup:
+```bash
+python sim_soccer_kick_physics.py
+```
+* **`[SPACE]` / `[K]`**: Luncurkan tendangan dinamis ($11-14\text{ km/h}$, jarak $>5\text{ meter}$)
+* **`[R]`**: Reset robot dan bola secara instan dan *thread-safe*
+* **`[C]`**: Toggle sudut pandang kamera (*Cinematic Side-View* vs *Tracking*)
+
+---
+
+### D. Uji Ketahanan Dorongan & Stepping Recovery
 Uji ketahanan fisik robot terhadap dorongan/benturan keras:
 ```bash
 python test_push_recovery.py

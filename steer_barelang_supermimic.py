@@ -2,37 +2,42 @@
 """
 steer_barelang_supermimic.py
 ----------------------------
-Ultimate Multi-Skill Locomotion Controller for BarelangS Humanoid
-Powered by SuperMimic and Bio-mechanical Human Motion Capture.
+Ultimate Multi-Skill Locomotion & Autonomous Striker Controller for BarelangS Humanoid.
+Powered by SuperMimic Bio-Mechanical Retargeting and Newton Dynamic Physics.
 
 Capabilities:
   - Compliant Standing (Idle / Standby)
-  - Human Walk (0.3 - 0.8 m/s)
+  - Natural Human Walk (0.3 - 0.8 m/s)
   - Human High-Speed Sprint / Run (0.8 - 1.62 m/s with flight phase)
-  - Dynamic Soccer Kick (Right Foot Strike)
-  - Omnidirectional Turning & Strafing (WASD)
-  - Chase-Cam & Free-Cam Tracking
+  - Dynamic Soccer Kick (Bio-Mechanical Strike launching ball at 10-17 km/h)
+  - Omnidirectional Turning & Strafing (WASD + Q/E)
+  - Autonomous RoboCup Striker AI ([T] Key):
+      * Approach & Sprint -> Precision Align -> Explosive Strike -> Goal Celebration!
+  - RoboCup Arena with Regulation Goal Posts, Crossbar, Net & Dynamic Ball
+  - Multi-Camera Views: Chase Cam ([V]=0), Broadcast Cam ([V]=1), Goal Cam ([V]=2)
+  - Thread-Safe Instant Reset ([R]) and Ball Respawn ([B])
 
 Keyboard Controls (In MuJoCo Viewer):
-  [W]          : Increase Forward Speed (Walk -> Sprint)
-  [S]          : Decelerate / Walk Backward / Stop
+  [T]          : Toggle Autonomous Striker AI (RoboCup AI Mode)
+  [W] / [S]    : Increase Forward Speed / Decelerate (Walk -> Sprint)
   [A] / [D]    : Steer / Turn Left / Right
   [Q] / [E]    : Strafe Left / Right
-  [K]          : Dynamic Soccer Kick (Right Foot)
-  [SPACE]      : Instant Stop / Stand Still
+  [K] / [SPACE]: Dynamic Soccer Kick (Right Foot Strike)
+  [SPACE]      : Instant Stop / Compliant Stand
   [1]          : Preset: Walk (0.50 m/s)
   [2]          : Preset: Fast Walk (0.80 m/s)
   [3]          : Preset: Sprint / Run (1.55 m/s)
-  [V]          : Toggle Camera Mode (Chase Cam vs Orbit Cam)
-  [R]          : Reset to Origin (0, 0)
+  [B]          : Respawn / Randomize Soccer Ball Position
+  [V]          : Cycle Camera Views (Chase Cam -> Broadcast -> Goal Cam)
+  [R]          : Reset Robot and Ball to Origin
   [ESC]        : Exit
 
 Usage:
-  # Interactive 3D Window with WASD controls:
+  # Interactive 3D Window with WASD controls & AI Toggle [T]:
   python steer_barelang_supermimic.py
 
-  # Headless video demonstration (Walk -> Sprint -> Turn -> Kick -> Stand):
-  python steer_barelang_supermimic.py --render-demo data/mocap/barelang_multiskill_demo.mp4
+  # Headless video demonstration:
+  python steer_barelang_supermimic.py --render-demo data/mocap/barelang_soccer_striker_match.mp4
 """
 
 import os
@@ -55,6 +60,8 @@ KEY_E = 69
 KEY_K = 75
 KEY_R = 82
 KEY_V = 86
+KEY_T = 84
+KEY_B = 66
 KEY_1 = 49
 KEY_2 = 50
 KEY_3 = 51
@@ -62,14 +69,18 @@ KEY_3 = 51
 LEG_QPOS_ADR = [21, 22, 23, 24, 25, 26, 15, 16, 17, 18, 19, 20]
 LEG_ACT_ID   = [12, 0, 1, 2, 3, 4, 13, 5, 6, 7, 8, 9]
 
+def wrap_to_pi(angle: float) -> float:
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
 class MultiSkillController:
     def __init__(
         self,
         walk_path: str = "data/mocap/barelang_mocap_walk.npz",
         run_path: str = "data/mocap/barelang_mocap_run.npz",
         xml_path: str = "barelangS_terrain_mujoco.xml",
+        ball_pos: tuple = (2.0, 0.20),
     ):
-        print("Loading Walk & Run MoCap libraries...")
+        print("Loading Human Walking & Sprinting MoCap libraries...")
         w_data = np.load(walk_path)
         r_data = np.load(run_path)
 
@@ -85,9 +96,58 @@ class MultiSkillController:
         self.run_cycle_len = self.run_cycle_end - self.run_cycle_start
         self.run_speed_ref = float(r_data.get("walking_speed", 1.621))
 
-        print(f"Loading MuJoCo physics model: {xml_path}")
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
+        # Build Soccer Pitch Arena with Regulation Goal Posts & Ball
+        print(f"Building RoboCup Soccer Arena from: {xml_path}")
+        with open(xml_path, "r") as f:
+            xml_content = f.read()
+
+        xml_flat = xml_content.replace('type="hfield" hfield="terrain"', 'type="plane" size="30 30 0.1"')
+
+        soccer_arena_xml = f"""
+        <!-- RoboCup Soccer Goal Posts at X=4.0m -->
+        <body name="goal_post_left" pos="4.0 -0.9 0.55">
+            <geom name="geom_goal_post_left" type="cylinder" size="0.035 0.55" rgba="0.95 0.95 0.95 1.0"/>
+        </body>
+        <body name="goal_post_right" pos="4.0 0.9 0.55">
+            <geom name="geom_goal_post_right" type="cylinder" size="0.035 0.55" rgba="0.95 0.95 0.95 1.0"/>
+        </body>
+        <body name="goal_crossbar" pos="4.0 0.0 1.10">
+            <geom name="geom_goal_crossbar" type="cylinder" size="0.035 0.90" euler="1.5708 0 0" rgba="0.95 0.95 0.95 1.0"/>
+        </body>
+        <body name="goal_net_back" pos="4.45 0.0 0.55">
+            <geom name="geom_net_back" type="box" size="0.015 0.90 0.55" rgba="0.85 0.85 0.85 0.30"/>
+            <geom name="geom_net_left" type="box" size="0.45 0.015 0.55" pos="-0.225 -0.9 0" rgba="0.85 0.85 0.85 0.25"/>
+            <geom name="geom_net_right" type="box" size="0.45 0.015 0.55" pos="-0.225 0.9 0" rgba="0.85 0.85 0.85 0.25"/>
+            <geom name="geom_net_top" type="box" size="0.45 0.90 0.015" pos="-0.225 0 0.55" rgba="0.85 0.85 0.85 0.25"/>
+        </body>
+
+        <!-- Field Visual Lines -->
+        <body name="field_lines" pos="2.0 0.0 0.002">
+            <geom name="geom_goal_line" type="box" size="0.025 1.5 0.001" pos="2.0 0 0" rgba="0.95 0.95 0.95 0.8"/>
+            <geom name="geom_penalty_box_top" type="box" size="0.75 0.025 0.001" pos="1.25 1.5 0" rgba="0.95 0.95 0.95 0.8"/>
+            <geom name="geom_penalty_box_bottom" type="box" size="0.75 0.025 0.001" pos="1.25 -1.5 0" rgba="0.95 0.95 0.95 0.8"/>
+            <geom name="geom_penalty_box_front" type="box" size="0.025 1.5 0.001" pos="0.5 0 0" rgba="0.95 0.95 0.95 0.8"/>
+        </body>
+
+        <!-- RoboCup Soccer Ball with Newton Freejoint -->
+        <body name="soccer_ball" pos="{ball_pos[0]} {ball_pos[1]} 0.065">
+            <freejoint name="ball_joint"/>
+            <geom name="ball_geom" type="sphere" size="0.065" mass="0.08"
+                  rgba="1.0 0.25 0.05 1.0" friction="0.60 0.005 0.0001"
+                  solref="0.003 1.0" solimp="0.95 0.99 0.001"/>
+        </body>
+        """
+        xml_arena = xml_flat.replace("</worldbody>", soccer_arena_xml + "\n</worldbody>")
+
+        self.model = mujoco.MjModel.from_xml_string(xml_arena)
         self.data = mujoco.MjData(self.model)
+
+        self.ball_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "soccer_ball")
+        self.torso_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "torso_2025")
+        self.ball_jnt_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "ball_joint")
+        self.ball_qposadr = self.model.jnt_qposadr[self.ball_jnt_id]
+        self.ball_dofadr = self.model.jnt_dofadr[self.ball_jnt_id]
+        self.initial_ball_pos = np.array([ball_pos[0], ball_pos[1], 0.065], dtype=np.float32)
 
         # Compliant Standing Pose
         self.standing_legs = np.array([
@@ -113,6 +173,11 @@ class MultiSkillController:
         }
 
         # Locomotion Command & State
+        self.dt = 1.0 / 60.0
+        self.pos_x = 0.0
+        self.pos_y = 0.0
+        self.heading = 0.0
+
         self.cmd_vx = 0.0
         self.cmd_vy = 0.0
         self.cmd_wz = 0.0
@@ -120,9 +185,6 @@ class MultiSkillController:
         self.target_vy = 0.0
         self.target_wz = 0.0
 
-        self.pos_x = 0.0
-        self.pos_y = 0.0
-        self.heading = 0.0
         self.walk_phase = float(self.walk_cycle_start)
         self.run_phase = float(self.run_cycle_start)
 
@@ -131,14 +193,22 @@ class MultiSkillController:
 
         # Kick state
         self.is_kicking = False
-        self.kick_progress = 0.0  # 0.0 to 1.0
+        self.kick_time = 0.0
         self.kick_duration = 0.65 # seconds
+        self.peak_ball_speed = 0.0
 
-        self.chase_cam = True
+        # Autonomous Striker AI state
+        self.autonomous_ai = False  # Toggle with [T]
+        self.fsm_state = "APPROACH"
+        self.celebrate_timer = 0.0
+        self.score = 0
+        self.goal_scored_current = False
+
+        self.cam_mode = 0  # 0: Chase Cam, 1: Broadcast Cam, 2: Goal Cam
         self.reset_requested = False
         self.reset_to_origin()
 
-    def reset_to_origin(self):
+    def reset_to_origin(self, new_ball_pos: tuple = None):
         self.pos_x = 0.0
         self.pos_y = 0.0
         self.heading = 0.0
@@ -153,7 +223,11 @@ class MultiSkillController:
         self.stand_blend = 1.0
         self.run_blend = 0.0
         self.is_kicking = False
-        self.kick_progress = 0.0
+        self.kick_time = 0.0
+        self.peak_ball_speed = 0.0
+        self.fsm_state = "APPROACH"
+        self.celebrate_timer = 0.0
+        self.goal_scored_current = False
         self.reset_requested = False
 
         mujoco.mj_resetData(self.model, self.data)
@@ -163,6 +237,7 @@ class MultiSkillController:
         self.data.qpos[3] = 1.0
         self.data.qpos[4:7] = 0.0
         self.data.qvel[:] = 0.0
+        self.data.xfrc_applied[:] = 0.0
 
         for i, qadr in enumerate(LEG_QPOS_ADR):
             self.data.qpos[qadr] = self.standing_legs[i]
@@ -170,74 +245,174 @@ class MultiSkillController:
         for act_id, val in self.upper_act_dict.items():
             self.data.ctrl[act_id] = val
 
+        self.data.qpos[9] = 1.57
+        self.data.qpos[10] = -0.15
+        self.data.qpos[11] = -0.80
+        self.data.qpos[12] = 1.57
+        self.data.qpos[13] = 0.15
+        self.data.qpos[14] = -0.80
+
+        # Respawn soccer ball
+        if new_ball_pos is not None:
+            self.initial_ball_pos[0] = new_ball_pos[0]
+            self.initial_ball_pos[1] = new_ball_pos[1]
+
+        self.data.qpos[self.ball_qposadr:self.ball_qposadr+3] = self.initial_ball_pos
+        self.data.qpos[self.ball_qposadr+3] = 1.0
+        self.data.qpos[self.ball_qposadr+4:self.ball_qposadr+7] = 0.0
+        self.data.qvel[self.ball_dofadr:self.ball_dofadr+6] = 0.0
+
         mujoco.mj_forward(self.model, self.data)
 
     def trigger_kick(self):
         if not self.is_kicking:
             self.is_kicking = True
-            self.kick_progress = 0.0
+            self.kick_time = 0.0
             print("\n[ACTION] DYNAMIC SOCCER KICK!")
 
     def key_callback(self, keycode: int):
         speed_step = 0.18
         turn_step = 0.25
 
-        if keycode == KEY_W:
-            self.target_vx = min(1.65, self.target_vx + speed_step)
-        elif keycode == KEY_S:
-            self.target_vx = max(-0.35, self.target_vx - speed_step)
-        elif keycode == KEY_A:
-            self.target_wz = min(1.0, self.target_wz + turn_step)
-        elif keycode == KEY_D:
-            self.target_wz = max(-1.0, self.target_wz - turn_step)
-        elif keycode == KEY_Q:
-            self.target_vy = min(0.35, self.target_vy + 0.10)
-        elif keycode == KEY_E:
-            self.target_vy = max(-0.35, self.target_vy - 0.10)
-        elif keycode == KEY_K:
-            self.trigger_kick()
-        elif keycode == KEY_SPACE:
-            self.target_vx = 0.0
-            self.target_vy = 0.0
-            self.target_wz = 0.0
-            self.is_kicking = False
-        elif keycode == KEY_1:
-            self.target_vx = 0.50  # Walk
-        elif keycode == KEY_2:
-            self.target_vx = 0.80  # Fast Walk
-        elif keycode == KEY_3:
-            self.target_vx = 1.55  # Sprint / Run
+        if keycode in [KEY_T, 84, 116]:
+            self.autonomous_ai = not self.autonomous_ai
+            status = "AUTONOMOUS STRIKER AI ACTIVE" if self.autonomous_ai else "MANUAL TELEOPERATION"
+            print(f"\n[MODE] Switched to: {status}")
+        elif keycode in [KEY_B, 66, 98]:
+            bx = 2.0 + np.random.uniform(-0.3, 0.3)
+            by = 0.2 + np.random.uniform(-0.4, 0.4)
+            self.reset_to_origin(new_ball_pos=(bx, by))
+            print(f"\n[BALL RESPAWN] New position: ({bx:.2f}, {by:.2f})")
         elif keycode in [KEY_R, 82, 114]:
             self.reset_requested = True
             print("\n[RESET REQUESTED]")
-        elif keycode == KEY_V:
-            self.chase_cam = not self.chase_cam
-            print(f"\n[CAMERA] {'Chase Cam' if self.chase_cam else 'Free Cam'}")
+        elif keycode in [KEY_V, 86, 118]:
+            self.cam_mode = (self.cam_mode + 1) % 3
+            cam_names = ["Dynamic Chase Cam", "Broadcast Arena Cam", "Goal Net Cam"]
+            print(f"\n[CAMERA] Switched to: {cam_names[self.cam_mode]}")
+        elif not self.autonomous_ai:
+            if keycode == KEY_W:
+                self.target_vx = min(1.65, self.target_vx + speed_step)
+            elif keycode == KEY_S:
+                self.target_vx = max(-0.35, self.target_vx - speed_step)
+            elif keycode == KEY_A:
+                self.target_wz = min(1.0, self.target_wz + turn_step)
+            elif keycode == KEY_D:
+                self.target_wz = max(-1.0, self.target_wz - turn_step)
+            elif keycode == KEY_Q:
+                self.target_vy = min(0.35, self.target_vy + 0.10)
+            elif keycode == KEY_E:
+                self.target_vy = max(-0.35, self.target_vy - 0.10)
+            elif keycode in [KEY_K, KEY_SPACE]:
+                self.trigger_kick()
+            elif keycode == KEY_1:
+                self.target_vx = 0.50  # Walk
+            elif keycode == KEY_2:
+                self.target_vx = 0.80  # Fast Walk
+            elif keycode == KEY_3:
+                self.target_vx = 1.55  # Sprint / Run
 
-    def compute_kick_pose(self) -> np.ndarray:
-        """Computes 12-leg joint positions during soccer kick."""
-        t = self.kick_progress
+    def compute_kick_pose(self, tau: float) -> np.ndarray:
+        """Computes bio-mechanical whole-body leg joint positions during soccer kick."""
         legs = self.standing_legs.copy()
-
-        if t < 0.30:  # Windup: shift weight to left stance, draw right leg back
-            s = t / 0.30
+        if tau < 0.30:  # Windup: shift weight to left stance, draw right leg back
+            s = tau / 0.30
             legs[1] -= 0.14 * s  # L hip roll (weight shift)
-            legs[8] += 0.50 * s  # R hip pitch back
-            legs[9] += 0.95 * s  # R knee bend
-        elif t < 0.60:  # Explosive forward strike
-            s = (t - 0.30) / 0.30
+            legs[8] += 0.52 * s  # R hip pitch back
+            legs[9] += 0.98 * s  # R knee bend
+        elif tau < 0.60:  # Explosive forward strike
+            s = (tau - 0.30) / 0.30
             legs[1] -= 0.14
-            legs[8] = 0.50 - 1.35 * s   # R hip pitch forward to -0.85
-            legs[9] = 1.25 - 1.05 * s   # R knee snaps forward to 0.20
+            legs[8] = 0.52 - 1.42 * s   # R hip pitch forward to -0.90 rad
+            legs[9] = 1.28 - 1.08 * s   # R knee snaps forward to 0.20 rad
             legs[10] = -0.10 - 0.25 * s # R ankle stiff
         else:  # Follow-through and recovery
-            s = (t - 0.60) / 0.40
+            s = (tau - 0.60) / 0.40
             legs[1] = -0.14 * (1.0 - s)
-            legs[8] = -0.85 * (1.0 - s) + (-0.20) * s
+            legs[8] = -0.90 * (1.0 - s) + (-0.20) * s
             legs[9] = 0.20 * (1.0 - s) + 0.30 * s
             legs[10] = -0.35 * (1.0 - s) + (-0.10) * s
-
         return legs
+
+    def update_autonomous_ai(self):
+        """Finite State Machine for Autonomous Striker AI."""
+        ball_pos = self.data.qpos[self.ball_qposadr:self.ball_qposadr+3]
+        ball_vel = self.data.qvel[self.ball_dofadr:self.ball_dofadr+3]
+        ball_speed = math.sqrt(ball_vel[0]**2 + ball_vel[1]**2)
+
+        goal_x, goal_y = 4.0, 0.0
+
+        if self.fsm_state == "APPROACH":
+            dx = ball_pos[0] - self.pos_x
+            dy = ball_pos[1] - self.pos_y
+            dist_to_ball = math.sqrt(dx**2 + dy**2)
+            target_heading = math.atan2(dy, dx)
+            angle_err = wrap_to_pi(target_heading - self.heading)
+
+            if dist_to_ball > 0.80:
+                self.target_wz = np.clip(2.5 * angle_err, -1.0, 1.0)
+                if abs(angle_err) < 0.30:
+                    self.target_vx = 1.45 if dist_to_ball > 1.35 else 0.80
+                else:
+                    self.target_vx = 0.30
+                self.target_vy = 0.0
+            else:
+                self.fsm_state = "ALIGN"
+
+        elif self.fsm_state == "ALIGN":
+            theta_shot = math.atan2(goal_y - ball_pos[1], goal_x - ball_pos[0])
+            dx_offset = 0.180 * math.cos(theta_shot) - (-0.068) * math.sin(theta_shot)
+            dy_offset = 0.180 * math.sin(theta_shot) + (-0.068) * math.cos(theta_shot)
+            r_x = ball_pos[0] - dx_offset
+            r_y = ball_pos[1] - dy_offset
+
+            ex = r_x - self.pos_x
+            ey = r_y - self.pos_y
+            e_dist = math.sqrt(ex**2 + ey**2)
+            e_heading = wrap_to_pi(theta_shot - self.heading)
+
+            vx_body = ex * math.cos(self.heading) + ey * math.sin(self.heading)
+            vy_body = -ex * math.sin(self.heading) + ey * math.cos(self.heading)
+
+            self.target_vx = np.clip(1.8 * vx_body, -0.20, 0.40)
+            self.target_vy = np.clip(1.8 * vy_body, -0.25, 0.25)
+            self.target_wz = np.clip(2.5 * e_heading, -0.80, 0.80)
+
+            speed = math.sqrt(self.cmd_vx**2 + self.cmd_vy**2)
+            if e_dist < 0.020 and abs(e_heading) < 0.06 and speed < 0.08:
+                self.fsm_state = "KICK"
+                self.target_vx = 0.0
+                self.target_vy = 0.0
+                self.target_wz = 0.0
+                self.trigger_kick()
+
+        elif self.fsm_state == "KICK":
+            self.target_vx = 0.0
+            self.target_vy = 0.0
+            self.target_wz = 0.0
+            if not self.is_kicking:
+                self.fsm_state = "EVALUATE"
+
+        elif self.fsm_state == "EVALUATE":
+            if ball_pos[0] >= 4.0 and abs(ball_pos[1]) <= 0.90:
+                self.fsm_state = "CELEBRATE"
+                self.celebrate_timer = 0.0
+                if not self.goal_scored_current:
+                    self.score += 1
+                    self.goal_scored_current = True
+                    print(f"\n[GOAL!] SCORE: {self.score} - 0! Ball in net at ({ball_pos[0]:.2f}, {ball_pos[1]:.2f})")
+            elif ball_speed < 0.05:
+                self.fsm_state = "APPROACH"
+
+        elif self.fsm_state == "CELEBRATE":
+            self.target_vx = 0.0
+            self.target_vy = 0.0
+            self.target_wz = 0.0
+            self.celebrate_timer += self.dt
+            if self.celebrate_timer > 3.5:
+                bx = 2.0 + np.random.uniform(-0.2, 0.2)
+                by = 0.2 + np.random.uniform(-0.3, 0.3)
+                self.reset_to_origin(new_ball_pos=(bx, by))
 
     def update_step(self, dt: float):
         if self.reset_requested:
@@ -245,117 +420,142 @@ class MultiSkillController:
             print("[RESET] Returned to origin (0, 0)")
             return
 
-        # 1. Smooth command filtering
-        acc_lin = 2.2 * dt
-        acc_ang = 3.5 * dt
+        # 1. Autonomous AI Update
+        if self.autonomous_ai:
+            self.update_autonomous_ai()
+
+        # 2. Smooth command filtering
+        acc_lin = 3.5 * dt
+        acc_ang = 4.5 * dt
         self.cmd_vx = np.clip(self.target_vx, self.cmd_vx - acc_lin, self.cmd_vx + acc_lin)
         self.cmd_vy = np.clip(self.target_vy, self.cmd_vy - acc_lin, self.cmd_vy + acc_lin)
         self.cmd_wz = np.clip(self.target_wz, self.cmd_wz - acc_ang, self.cmd_wz + acc_ang)
 
         speed = math.sqrt(self.cmd_vx**2 + self.cmd_vy**2)
 
-        # 2. Stand vs Walk vs Run Blending
+        # 3. Stand vs Walk vs Run Blending
         if speed < 0.05 and abs(self.cmd_wz) < 0.05 and not self.is_kicking:
-            self.stand_blend = min(1.0, self.stand_blend + 4.5 * dt)
+            self.stand_blend = min(1.0, self.stand_blend + 5.0 * dt)
         else:
-            self.stand_blend = max(0.0, self.stand_blend - 4.5 * dt)
+            self.stand_blend = max(0.0, self.stand_blend - 5.0 * dt)
 
-        # Run blend: 0.0 when speed <= 0.75, 1.0 when speed >= 1.35
         target_run_b = np.clip((speed - 0.75) / (1.35 - 0.75), 0.0, 1.0)
         self.run_blend += np.clip(target_run_b - self.run_blend, -3.0 * dt, 3.0 * dt)
 
-        # 3. Update Heading & World Translation
+        # 4. Update Heading & World Translation
+        prev_pos_x = self.pos_x
+        prev_pos_y = self.pos_y
         self.heading += self.cmd_wz * dt
         cos_h = math.cos(self.heading)
         sin_h = math.sin(self.heading)
-        vx_world = cos_h * self.cmd_vx - sin_h * self.cmd_vy
-        vy_world = sin_h * self.cmd_vx + cos_h * self.cmd_vy
-        self.pos_x += vx_world * dt
-        self.pos_y += vy_world * dt
+        self.pos_x += (cos_h * self.cmd_vx - sin_h * self.cmd_vy) * dt
+        self.pos_y += (sin_h * self.cmd_vx + cos_h * self.cmd_vy) * dt
 
-        # 4. Advance Gait Phases
+        # 5. Advance Gait Phases
         if self.stand_blend < 0.99 and not self.is_kicking:
-            # Walk phase
             w_speed_ratio = max(0.2, min(1.1, speed / self.walk_speed_ref)) if speed > 0.05 else 0.5 * abs(self.cmd_wz)
             self.walk_phase += 60.0 * w_speed_ratio * dt
             if self.walk_phase >= self.walk_cycle_end:
                 self.walk_phase = self.walk_cycle_start + (self.walk_phase - self.walk_cycle_end) % self.walk_cycle_len
 
-            # Run phase
             r_speed_ratio = max(0.6, speed / self.run_speed_ref)
             self.run_phase += 60.0 * r_speed_ratio * dt
             if self.run_phase >= self.run_cycle_end:
                 self.run_phase = self.run_cycle_start + (self.run_phase - self.run_cycle_end) % self.run_cycle_len
 
-        # 5. Interpolate MoCap Poses
-        # Walk pose
+        # 6. Interpolate MoCap Poses
         f_w0 = int(math.floor(self.walk_phase))
         f_w1 = (f_w0 + 1) if (f_w0 + 1) < self.walk_cycle_end else self.walk_cycle_start
         a_w = self.walk_phase - f_w0
         walk_legs = (1.0 - a_w) * self.walk_qpos[f_w0, LEG_QPOS_ADR] + a_w * self.walk_qpos[f_w1, LEG_QPOS_ADR]
         walk_root_z = (1.0 - a_w) * self.walk_qpos[f_w0, 2] + a_w * self.walk_qpos[f_w1, 2]
 
-        # Run pose
         f_r0 = int(math.floor(self.run_phase))
         f_r1 = (f_r0 + 1) if (f_r0 + 1) < self.run_cycle_end else self.run_cycle_start
         a_r = self.run_phase - f_r0
         run_legs = (1.0 - a_r) * self.run_qpos[f_r0, LEG_QPOS_ADR] + a_r * self.run_qpos[f_r1, LEG_QPOS_ADR]
         run_root_z = (1.0 - a_r) * self.run_qpos[f_r0, 2] + a_r * self.run_qpos[f_r1, 2]
 
-        # Blend Walk & Run
         r_b = self.run_blend
         loco_legs = (1.0 - r_b) * walk_legs + r_b * run_legs
         loco_root_z = (1.0 - r_b) * walk_root_z + r_b * run_root_z
 
-        # Steering bias into turn
         steer_bias = float(np.clip(0.35 * self.cmd_wz, -0.45, 0.45))
-        loco_legs[0] += steer_bias  # L hip yaw
-        loco_legs[6] += steer_bias  # R hip yaw
+        loco_legs[0] += steer_bias
+        loco_legs[6] += steer_bias
 
-        # 6. Kick Action Processing
+        # 7. Kick Action Processing
         if self.is_kicking:
-            kick_legs = self.compute_kick_pose()
-            final_legs = kick_legs
-            final_root_z = self.standing_root_z
-            self.kick_progress += dt / self.kick_duration
-            if self.kick_progress >= 1.0:
+            self.kick_time += dt
+            if self.kick_time < self.kick_duration:
+                tau = self.kick_time / self.kick_duration
+                final_legs = self.compute_kick_pose(tau)
+            else:
                 self.is_kicking = False
-                self.kick_progress = 0.0
-                print("\n[ACTION] Kick completed! Returned to stance.")
+                final_legs = self.standing_legs
+            final_root_z = self.standing_root_z
         else:
-            # Blend Locomotion & Standing
             s_b = self.stand_blend
             final_legs = s_b * self.standing_legs + (1.0 - s_b) * loco_legs
             final_root_z = s_b * self.standing_root_z + (1.0 - s_b) * loco_root_z
 
-        # 7. Apply to MuJoCo data
+        # 8. Apply Kinematics to MuJoCo
+        prev_qpos = self.data.qpos.copy()
         self.data.qpos[0] = self.pos_x
         self.data.qpos[1] = self.pos_y
         self.data.qpos[2] = final_root_z
 
-        # Orientation: heading yaw + pelvic tilt
         q_heading = sptr.Rotation.from_euler("z", self.heading)
         self.data.qpos[3:7] = [q_heading.as_quat()[3], q_heading.as_quat()[0], q_heading.as_quat()[1], q_heading.as_quat()[2]]
 
         for i, qadr in enumerate(LEG_QPOS_ADR):
             self.data.qpos[qadr] = final_legs[i]
 
-        # Arms: dynamic arm swing scales with speed and run blend
-        arm_amp = 0.35 * (1.0 - r_b) + 0.65 * r_b
-        arm_pitch_offset = -0.40 * r_b  # lean forward during sprint
-        arm_swing = (1.0 - self.stand_blend) * arm_amp * math.sin(
-            2.0 * math.pi * (self.run_phase if r_b > 0.5 else self.walk_phase) / 60.0
-        )
-        elbow = -0.75 * (1.0 - r_b) - 1.25 * r_b
+        # Upper Body: Arms celebration vs dynamic swing
+        if self.fsm_state == "CELEBRATE":
+            self.data.qpos[9]  = 0.20   # R shoulder pitch up
+            self.data.qpos[10] = -0.55  # R shoulder roll out
+            self.data.qpos[11] = -0.40  # R elbow
+            self.data.qpos[12] = 0.20   # L shoulder pitch up
+            self.data.qpos[13] = 0.55   # L shoulder roll out
+            self.data.qpos[14] = -0.40  # L elbow
+        elif self.is_kicking:
+            tau = self.kick_time / self.kick_duration
+            arm_swing = 0.45 * math.sin(math.pi * tau)
+            self.data.qpos[9]  = 1.57 - arm_swing
+            self.data.qpos[12] = 1.57 + arm_swing
+        else:
+            arm_amp = 0.35 * (1.0 - r_b) + 0.65 * r_b
+            arm_pitch_offset = -0.40 * r_b
+            arm_swing = (1.0 - self.stand_blend) * arm_amp * math.sin(
+                2.0 * math.pi * (self.run_phase if r_b > 0.5 else self.walk_phase) / 60.0
+            )
+            elbow = -0.75 * (1.0 - r_b) - 1.25 * r_b
+            self.data.qpos[9]  = 1.57 - arm_swing + arm_pitch_offset
+            self.data.qpos[10] = -0.15
+            self.data.qpos[11] = elbow
+            self.data.qpos[12] = 1.57 + arm_swing + arm_pitch_offset
+            self.data.qpos[13] = 0.15
+            self.data.qpos[14] = elbow
 
-        self.data.qpos[9]  = 1.57 - arm_swing + arm_pitch_offset
-        self.data.qpos[10] = -0.15
-        self.data.qpos[11] = elbow
-        self.data.qpos[12] = 1.57 + arm_swing + arm_pitch_offset
-        self.data.qpos[13] = 0.15
-        self.data.qpos[14] = elbow
+        # Update velocities for dynamic contact impulse
+        self.data.qvel[0] = (self.pos_x - prev_qpos[0]) / dt
+        self.data.qvel[1] = (self.pos_y - prev_qpos[1]) / dt
+        self.data.qvel[2] = 0.0
+        for i, qadr in enumerate(LEG_QPOS_ADR):
+            dof = self.model.jnt_dofadr[self.model.jnt_qposadr.tolist().index(qadr)]
+            self.data.qvel[dof] = (final_legs[i] - prev_qpos[qadr]) / dt
 
-        mujoco.mj_forward(self.model, self.data)
+        # 9. Multi-substep Newton Physics integration
+        substeps = int(round(dt / self.model.opt.timestep))
+        for _ in range(substeps):
+            mujoco.mj_step(self.model, self.data)
+
+        # Track ball velocity
+        b_vx = self.data.qvel[self.ball_dofadr]
+        b_vy = self.data.qvel[self.ball_dofadr + 1]
+        b_v = math.sqrt(b_vx**2 + b_vy**2)
+        self.peak_ball_speed = max(self.peak_ball_speed, b_v)
 
     def run_gui(self):
         try:
@@ -364,26 +564,25 @@ class MultiSkillController:
             print("[ERROR] mujoco.viewer requires OpenGL/GLFW. Use --render-demo instead.")
             return
 
-        print("=" * 78)
-        print("  BARELANG-S SUPERMIMIC MULTI-SKILL CONTROLLER")
-        print("  [Stand | Walk | Sprint / Run | Dynamic Soccer Kick]")
-        print("=" * 78)
+        print("=" * 82)
+        print("  BARELANG-S SUPERMIMIC MULTI-SKILL & ROBOCUP STRIKER CONTROLLER")
+        print("=" * 82)
         print("  Controls:")
-        print("    [W] / [S] : Forward / Backward (Walk -> Sprint)")
-        print("    [A] / [D] : Steer Left / Right")
-        print("    [Q] / [E] : Strafe Left / Right")
-        print("    [K]       : DYNAMIC SOCCER KICK (Right Foot)")
-        print("    [SPACE]   : Instant Stop / Compliant Stand")
-        print("    [1]       : Walk Preset (0.50 m/s)")
-        print("    [2]       : Fast Walk Preset (0.80 m/s)")
-        print("    [3]       : SPRINT / RUN Preset (1.55 m/s)")
-        print("    [V]       : Toggle Chase Cam")
-        print("    [R]       : Reset to Origin")
-        print("=" * 78)
+        print("    [T]           : TOGGLE AUTONOMOUS STRIKER AI (RoboCup Mode)")
+        print("    [W] / [S]     : Forward / Backward (Walk -> Sprint)")
+        print("    [A] / [D]     : Steer Left / Right")
+        print("    [Q] / [E]     : Strafe Left / Right")
+        print("    [K] / [SPACE] : DYNAMIC SOCCER KICK (Right Foot Strike)")
+        print("    [SPACE]       : Instant Stop / Compliant Stand")
+        print("    [1]           : Walk Preset (0.50 m/s)")
+        print("    [2]           : Fast Walk Preset (0.80 m/s)")
+        print("    [3]           : SPRINT / RUN Preset (1.55 m/s)")
+        print("    [B]           : Respawn / Randomize Soccer Ball")
+        print("    [V]           : Cycle Camera Views (Chase -> Broadcast -> Goal Cam)")
+        print("    [R]           : Reset Robot & Ball to Origin")
+        print("=" * 82)
 
         with mujoco.viewer.launch_passive(self.model, self.data, key_callback=self.key_callback) as viewer:
-            torso_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "torso_2025")
-
             last_hud = 0.0
             dt = 1.0 / 60.0
 
@@ -391,30 +590,48 @@ class MultiSkillController:
                 step_start = time.time()
                 self.update_step(dt)
 
-                if self.chase_cam and torso_bid != -1:
+                if self.cam_mode == 0 and self.torso_bid != -1:
                     viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-                    viewer.cam.trackbodyid = torso_bid
+                    viewer.cam.trackbodyid = self.torso_bid
                     viewer.cam.distance = 2.4
                     viewer.cam.elevation = -14.0
                     viewer.cam.azimuth = math.degrees(self.heading) + 90.0
+                elif self.cam_mode == 1:
+                    viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+                    viewer.cam.lookat = [2.2, 0.0, 0.40]
+                    viewer.cam.distance = 5.2
+                    viewer.cam.elevation = -24.0
+                    viewer.cam.azimuth = 90.0
+                else:
+                    viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+                    viewer.cam.lookat = [2.0, 0.0, 0.40]
+                    viewer.cam.distance = 4.2
+                    viewer.cam.elevation = -10.0
+                    viewer.cam.azimuth = -90.0
 
                 viewer.sync()
 
                 now = time.time()
                 if now - last_hud > 0.12:
                     last_hud = now
-                    if self.is_kicking:
-                        gait_str = f"SOCCER KICK ({self.kick_progress*100:3.0f}%)"
+                    ball_x = self.data.qpos[self.ball_qposadr]
+                    ball_y = self.data.qpos[self.ball_qposadr + 1]
+                    dist_to_ball = math.sqrt((ball_x - self.pos_x)**2 + (ball_y - self.pos_y)**2)
+
+                    if self.autonomous_ai:
+                        mode_str = f"AUTO-STRIKER [{self.fsm_state}]"
+                    elif self.is_kicking:
+                        mode_str = f"SOCCER KICK ({self.kick_time/self.kick_duration*100:3.0f}%)"
                     elif self.stand_blend > 0.5:
-                        gait_str = "STAND"
+                        mode_str = "MANUAL: STAND"
                     elif self.run_blend > 0.5:
-                        gait_str = f"SPRINT ({self.cmd_vx:.2f}m/s)"
+                        mode_str = f"MANUAL: SPRINT ({self.cmd_vx:.2f}m/s)"
                     else:
-                        gait_str = f"WALK ({self.cmd_vx:.2f}m/s)"
+                        mode_str = f"MANUAL: WALK ({self.cmd_vx:.2f}m/s)"
 
                     hud = (
-                        f"\r[{gait_str:18s}] Heading={math.degrees(self.heading):+5.1f}° | "
-                        f"Pos: ({self.pos_x:+.2f}m, {self.pos_y:+.2f}m) | Speed: {self.cmd_vx:.2f}m/s  "
+                        f"\r[{mode_str:24s}] SCORE: {self.score}-0 | Ball: ({ball_x:.2f}, {ball_y:.2f}) "
+                        f"Dist: {dist_to_ball:.2f}m | Peak V: {self.peak_ball_speed*3.6:4.1f}km/h | Heading: {math.degrees(self.heading):+5.1f}°  "
                     )
                     sys.stdout.write(hud)
                     sys.stdout.flush()
@@ -423,102 +640,83 @@ class MultiSkillController:
                 if elapsed < dt:
                     time.sleep(dt - elapsed)
 
-    def render_demo(self, output_path: str = "data/mocap/barelang_multiskill_demo.mp4", duration_sec: float = 10.0):
+    def render_demo(self, output_path: str = "data/mocap/barelang_soccer_striker_match.mp4", duration_sec: float = 6.5):
         try:
             import cv2
         except ImportError:
             print("[ERROR] OpenCV (cv2) required for video rendering.")
             return
 
-        print(f"\nRendering Multi-Skill demonstration ({duration_sec}s @ 60fps) to: {output_path}")
+        print(f"\nRendering Autonomous RoboCup Striker Match ({duration_sec}s @ 60fps) to: {output_path}")
         renderer = mujoco.Renderer(self.model, 480, 640)
         camera = mujoco.MjvCamera()
-        camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-        torso_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "torso_2025")
-        if torso_bid != -1:
-            camera.trackbodyid = torso_bid
-        camera.distance = 2.5
-        camera.elevation = -14.0
+        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        camera.lookat = [2.1, 0.0, 0.35]
+        camera.distance = 4.8
+        camera.elevation = -22.0
+        camera.azimuth = 80.0
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         writer = cv2.VideoWriter(output_path, fourcc, 60.0, (640, 480))
 
+        self.reset_to_origin(new_ball_pos=(2.0, 0.15))
+        self.autonomous_ai = True
+
         total_frames = int(duration_sec * 60)
         dt = 1.0 / 60.0
-        self.reset_to_origin()
-
-        # Multi-Skill Demonstration Timeline:
-        # 0.0s - 1.0s: Stand still
-        # 1.0s - 3.5s: Smooth transition into Human Walk (Vx = 0.65 m/s)
-        # 3.5s - 6.0s: Accelerate into HIGH-SPEED SPRINT / RUN (Vx = 1.55 m/s, 5.6 km/h)
-        # 6.0s - 7.5s: Decelerate & execute S-Curve steering turn
-        # 7.5s - 8.5s: Stop & execute DYNAMIC SOCCER KICK!
-        # 8.5s - 10.0s: Return to rock-solid compliant standing
 
         for f in range(total_frames):
-            t = f * dt
-            if t < 1.0:
-                self.target_vx = 0.0
-                self.target_wz = 0.0
-            elif t < 3.5:
-                self.target_vx = 0.65
-                self.target_wz = 0.0
-            elif t < 6.0:
-                self.target_vx = 1.55  # Sprint / Run!
-                self.target_wz = 0.0
-            elif t < 7.3:
-                self.target_vx = 0.40
-                self.target_wz = 0.60  # Turn into kick position
-            elif t < 7.5:
-                self.target_vx = 0.0
-                self.target_wz = 0.0
-            elif t < 8.3:
-                if not self.is_kicking and self.kick_progress == 0.0:
-                    self.trigger_kick()
-            else:
-                self.target_vx = 0.0
-                self.target_wz = 0.0
-
+            sim_time = f * dt
             self.update_step(dt)
 
-            camera.azimuth = math.degrees(self.heading) + 90.0
+            if sim_time < 3.2:
+                camera.lookat = [1.5 + 0.3 * sim_time, 0.10, 0.35]
+                camera.distance = 4.8 - 0.25 * sim_time
+            else:
+                ball_x = self.data.qpos[self.ball_qposadr]
+                ball_y = self.data.qpos[self.ball_qposadr + 1]
+                camera.lookat = [min(3.8, max(2.5, ball_x)), ball_y * 0.5, 0.35]
+                camera.distance = 4.0
+
             renderer.update_scene(self.data, camera=camera)
             rgb = renderer.render()
 
-            # Burn HUD into video frame
-            if self.is_kicking:
-                state_lbl = f"SOCCER KICK ({self.kick_progress*100:.0f}%)"
-            elif self.stand_blend > 0.5:
-                state_lbl = "COMPLIANT STAND"
-            elif self.run_blend > 0.5:
-                state_lbl = f"SPRINT / RUN ({self.cmd_vx:.2f} m/s | 5.6 km/h)"
-            else:
-                state_lbl = f"NATURAL WALK ({self.cmd_vx:.2f} m/s)"
-
-            hud_text = f"T={t:4.1f}s | {state_lbl} | Pos: ({self.pos_x:+.2f}m, {self.pos_y:+.2f}m)"
             frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            cv2.putText(frame, hud_text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 255), 2)
+
+            hud_title = f"BARELANG-S ROBOCUP SOCCER STRIKER AI  |  SCORE: {self.score} - 0"
+            hud_status = f"T={sim_time:4.2f}s | State: {self.fsm_state:10s} | Speed: {self.cmd_vx:.2f} m/s | Ball V: {self.peak_ball_speed*3.6:4.1f} km/h"
+
+            cv2.rectangle(frame, (10, 10), (630, 68), (20, 20, 20), -1)
+            cv2.putText(frame, hud_title, (18, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 255, 255), 2)
+            cv2.putText(frame, hud_status, (18, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 255, 0), 2)
+
+            if self.fsm_state == "CELEBRATE":
+                cv2.putText(frame, "GOAL! 1 - 0!", (220, 180), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 255), 3)
 
             writer.write(frame)
 
             if f % 30 == 0 or f == total_frames - 1:
                 print(f"\rRendered {f+1}/{total_frames} frames ({f/total_frames*100:.1f}%) | "
-                      f"Mode: {state_lbl:30s}", end="", flush=True)
+                      f"State: {self.fsm_state:10s} | Score: {self.score}-0 | Peak V: {self.peak_ball_speed*3.6:.1f} km/h", end="", flush=True)
 
         writer.release()
-        print(f"\n[OK] Multi-skill demo video saved to: {output_path}")
+        print(f"\n[OK] Autonomous Striker match video successfully saved to: {output_path}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="BarelangS Multi-Skill Controller (Walk, Sprint, Kick, Steer)")
+    parser = argparse.ArgumentParser(description="BarelangS Multi-Skill & RoboCup Striker AI Controller")
     parser.add_argument("--walk", type=str, default="data/mocap/barelang_mocap_walk.npz")
     parser.add_argument("--run", type=str, default="data/mocap/barelang_mocap_run.npz")
     parser.add_argument("--xml", type=str, default="barelangS_terrain_mujoco.xml")
-    parser.add_argument("--render-demo", type=str, default=None, help="Render an MP4 video of multi-skill demonstration")
-    parser.add_argument("--duration", type=float, default=10.0, help="Demo duration in seconds")
+    parser.add_argument("--striker", action="store_true", help="Start directly in Autonomous Striker AI mode")
+    parser.add_argument("--render-demo", type=str, default=None, help="Render demo MP4 video")
+    parser.add_argument("--duration", type=float, default=6.5, help="Demo duration in seconds")
     args = parser.parse_args()
 
     controller = MultiSkillController(walk_path=args.walk, run_path=args.run, xml_path=args.xml)
+
+    if args.striker:
+        controller.autonomous_ai = True
 
     if args.render_demo:
         controller.render_demo(output_path=args.render_demo, duration_sec=args.duration)
