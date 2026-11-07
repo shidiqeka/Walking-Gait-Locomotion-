@@ -35,6 +35,19 @@ class PushRecoveryController:
         self.is_disturbed = False
         self.disturbance_magnitude = 0.0
 
+    def reset(self):
+        """Resets all internal filter states and disturbance estimates."""
+        self.pitch = 0.0
+        self.roll = 0.0
+        self.pitch_rate = 0.0
+        self.roll_rate = 0.0
+        self.lin_vx = 0.0
+        self.lin_vy = 0.0
+        self.filtered_pitch_rate = 0.0
+        self.filtered_roll_rate = 0.0
+        self.is_disturbed = False
+        self.disturbance_magnitude = 0.0
+
     def update_imu(self, quat_wxyz: np.ndarray, gyro_xyz: np.ndarray, lin_vel_base: np.ndarray, dt: float = 0.01667):
         """
         Updates internal state estimates from IMU and velocity measurements.

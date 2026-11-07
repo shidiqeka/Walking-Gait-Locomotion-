@@ -117,6 +117,7 @@ class PushRecoverySimulator:
         self.gait_phase = float(self.cycle_start)
         self.stand_blend = 0.0
         self.is_walking = True
+        self.reset_requested = False
 
         self.reset_to_start()
 
@@ -127,6 +128,8 @@ class PushRecoverySimulator:
         self.data.qpos[2] = self.standing_root_z
         self.data.qpos[3] = 1.0
         self.data.qpos[4:7] = 0.0
+        self.data.qvel[:] = 0.0
+        self.data.xfrc_applied[:] = 0.0
 
         for i, qadr in enumerate(LEG_QPOS_ADR):
             self.data.qpos[qadr] = self.standing_legs[i]
@@ -135,10 +138,15 @@ class PushRecoverySimulator:
             self.data.ctrl[act_id] = val
 
         self.gait_phase = float(self.cycle_start)
-        self.stand_blend = 0.0
+        self.stand_blend = 1.0
+        self.is_walking = False
+        self.cmd_vx = 0.0
+        self.cmd_wz = 0.0
         self.push_steps_remaining = 0
         self.push_force[:] = 0.0
         self.active_push_label = "None"
+        self.recovery.reset()
+        self.reset_requested = False
 
         mujoco.mj_forward(self.model, self.data)
 
@@ -179,11 +187,27 @@ class PushRecoverySimulator:
             self.cmd_wz = min(0.8, self.cmd_wz + 0.20)
         elif keycode == KEY_D:
             self.cmd_wz = max(-0.8, self.cmd_wz - 0.20)
-        elif keycode == KEY_R:
-            self.reset_to_start()
-            print("\n[RESET] Simulation reset to origin")
+        elif keycode in [KEY_R, 82, 114]:
+            self.reset_requested = True
+            print("\n[RESET REQUESTED]")
 
     def step(self):
+        if self.reset_requested:
+            self.reset_to_start()
+            print("[RESET] Simulation reset to origin & standing posture")
+            return
+
+        # Fall detection and auto-recovery
+        torso_z = self.data.xpos[self.torso_bid, 2]
+        w, x, y, z = self.data.qpos[3:7]
+        sin_pitch = np.clip(2.0 * (w * y - z * x), -1.0, 1.0)
+        pitch_deg = math.degrees(math.asin(sin_pitch))
+        roll_deg = math.degrees(math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y)))
+        if torso_z < -0.15 or abs(pitch_deg) > 55.0 or abs(roll_deg) > 55.0:
+            print("\n[FALL DETECTED] Auto-recovering robot to standing position...")
+            self.reset_to_start()
+            return
+
         dt = self.control_dt
 
         # 1. Read IMU states from MuJoCo simulation

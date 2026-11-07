@@ -135,6 +135,7 @@ class MultiSkillController:
         self.kick_duration = 0.65 # seconds
 
         self.chase_cam = True
+        self.reset_requested = False
         self.reset_to_origin()
 
     def reset_to_origin(self):
@@ -153,6 +154,7 @@ class MultiSkillController:
         self.run_blend = 0.0
         self.is_kicking = False
         self.kick_progress = 0.0
+        self.reset_requested = False
 
         mujoco.mj_resetData(self.model, self.data)
         self.data.qpos[0] = 0.0
@@ -160,6 +162,7 @@ class MultiSkillController:
         self.data.qpos[2] = self.standing_root_z
         self.data.qpos[3] = 1.0
         self.data.qpos[4:7] = 0.0
+        self.data.qvel[:] = 0.0
 
         for i, qadr in enumerate(LEG_QPOS_ADR):
             self.data.qpos[qadr] = self.standing_legs[i]
@@ -204,9 +207,9 @@ class MultiSkillController:
             self.target_vx = 0.80  # Fast Walk
         elif keycode == KEY_3:
             self.target_vx = 1.55  # Sprint / Run
-        elif keycode == KEY_R:
-            self.reset_to_origin()
-            print("\n[RESET] Returned to origin (0, 0)")
+        elif keycode in [KEY_R, 82, 114]:
+            self.reset_requested = True
+            print("\n[RESET REQUESTED]")
         elif keycode == KEY_V:
             self.chase_cam = not self.chase_cam
             print(f"\n[CAMERA] {'Chase Cam' if self.chase_cam else 'Free Cam'}")
@@ -237,6 +240,11 @@ class MultiSkillController:
         return legs
 
     def update_step(self, dt: float):
+        if self.reset_requested:
+            self.reset_to_origin()
+            print("[RESET] Returned to origin (0, 0)")
+            return
+
         # 1. Smooth command filtering
         acc_lin = 2.2 * dt
         acc_ang = 3.5 * dt
