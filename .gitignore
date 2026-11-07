@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.venv
+env/
+venv/
+
+# Heavy training logs & intermediate checkpoints (>400MB)
+checkpoints/
+logs/
+backup_old_50dim/
+
+# IDE
+.vscode/
+.idea/
